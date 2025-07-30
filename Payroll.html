@@ -1,0 +1,778 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Staff Payroll Tracker</title>
+    <meta name="theme-color" content="#1e40af"/>
+    <!-- Link to the dynamically generated manifest -->
+    <link id="manifest-link" rel="manifest">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .tab-button.active {
+            background-color: #1e40af; /* A darker blue for active tab */
+            box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
+        }
+        .hidden { display: none; }
+        /* For Signature Pad */
+        .touch-none { touch-action: none; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-900">
+
+    <div id="app-container">
+        <!-- App content will be rendered here -->
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, getDocs, onSnapshot, doc, getDoc, setDoc, deleteDoc, updateDoc, query, where, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- PWA SETUP (MANIFEST & SERVICE WORKER) ---
+
+        // 1. Create and link the Web App Manifest dynamically
+        const manifest = {
+            "name": "Staff Payroll Tracker",
+            "short_name": "Payroll",
+            "start_url": ".",
+            "display": "standalone",
+            "background_color": "#ffffff",
+            "theme_color": "#1e40af",
+            "description": "A simple app to track staff payroll and advances.",
+            "icons": [
+                {
+                    "src": "https://placehold.co/192x192/1e40af/ffffff?text=Payroll",
+                    "sizes": "192x192",
+                    "type": "image/png"
+                },
+                {
+                    "src": "https://placehold.co/512x512/1e40af/ffffff?text=Payroll",
+                    "sizes": "512x512",
+                    "type": "image/png"
+                }
+            ]
+        };
+        const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+        const manifestURL = URL.createObjectURL(manifestBlob);
+        document.getElementById('manifest-link').setAttribute('href', manifestURL);
+
+        // 2. Create and register the Service Worker
+        const swCode = `
+            const CACHE_NAME = 'payroll-tracker-cache-v1';
+            const urlsToCache = [
+                '/',
+                '/index.html' // Cache the root file
+            ];
+
+            self.addEventListener('install', event => {
+                event.waitUntil(
+                    caches.open(CACHE_NAME)
+                        .then(cache => {
+                            console.log('Opened cache');
+                            return cache.addAll(urlsToCache);
+                        })
+                );
+            });
+
+            self.addEventListener('fetch', event => {
+                event.respondWith(
+                    caches.match(event.request)
+                        .then(response => {
+                            if (response) {
+                                return response;
+                            }
+                            return fetch(event.request);
+                        }
+                    )
+                );
+            });
+        `;
+        const swBlob = new Blob([swCode], { type: 'application/javascript' });
+        const swURL = URL.createObjectURL(swBlob);
+
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register(swURL)
+                    .then(registration => {
+                        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                    })
+                    .catch(error => {
+                        console.log('ServiceWorker registration failed: ', error);
+                    });
+            });
+        }
+
+
+        // --- FIREBASE CONFIGURATION ---
+        const appId = "1:662017646229:web:5ae55323ed98151974459c";
+        const firebaseConfig = {
+            apiKey: "AIzaSyCAEUM5DIxpQRI1lC2bZYfvXBRCVBxIs5w",
+            authDomain: "staffpayrolltracker.firebaseapp.com",
+            projectId: "staffpayrolltracker",
+            storageBucket: "staffpayrolltracker.appspot.com",
+            messagingSenderId: "662017646229",
+            appId: "1:662017646229:web:5ae55323ed98151974459c"
+        };
+
+        // --- INITIALIZE FIREBASE ---
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // --- GLOBAL STATE ---
+        let currentShopId = sessionStorage.getItem('currentShopId') || null;
+        let staffList = [];
+        let activeTab = 'staff';
+        
+        const appContainer = document.getElementById('app-container');
+
+        // --- UTILITY FUNCTIONS ---
+        const showModal = (content, isConfirm = false, onConfirm = null, isRawHtml = false) => {
+            const existingModal = document.getElementById('message-modal');
+            if (existingModal) existingModal.remove();
+
+            const contentHtml = isRawHtml ? content : `<p class="text-lg font-semibold mb-4">${content}</p>`;
+
+            const modalHTML = `
+                <div id="message-modal" class="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50 p-4">
+                    <div class="bg-white p-6 rounded-lg shadow-xl max-w-md w-full text-center">
+                        ${contentHtml}
+                        <div class="flex justify-center space-x-4 mt-4">
+                            ${isConfirm ? `<button id="modal-confirm-btn" class="px-6 py-2 bg-red-600 text-white rounded-md hover:bg-red-700">Yes</button>` : ''}
+                            <button id="modal-close-btn" class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">${isConfirm ? 'No' : 'OK'}</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+            const closeModal = () => document.getElementById('message-modal')?.remove();
+            
+            document.getElementById('modal-close-btn').onclick = closeModal;
+            if (isConfirm && onConfirm) {
+                document.getElementById('modal-confirm-btn').onclick = () => {
+                    onConfirm();
+                    closeModal();
+                };
+            }
+        };
+
+        const showSalaryDetailsModal = (salary) => {
+            const staff = staffList.find(s => s.id === salary.selectedStaffId);
+            const leaveDeduction = ((salary.leaveDays || 0) - (salary.companyLeaveDays || 0)) * (salary.perDayDeduction || 0);
+
+            const modalContent = `
+                <div class="text-left">
+                    <h3 class="text-xl font-bold mb-4 text-gray-800 text-center">Salary Slip Details</h3>
+                    <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-gray-700">
+                        <p class="font-semibold">Staff Name:</p><p>${staff ? staff.name : 'N/A'}</p>
+                        <p class="font-semibold">From Date:</p><p>${new Date(salary.fromDate).toLocaleDateString()}</p>
+                        <p class="font-semibold">To Date:</p><p>${new Date(salary.toDate).toLocaleDateString()}</p>
+                        <p class="font-semibold">Base Salary:</p><p>₹${salary.defaultSalary.toLocaleString()}</p>
+                        <p class="font-semibold">Total Advances:</p><p>₹${salary.totalAdvances.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                        <p class="font-semibold">Leave Days:</p><p>${salary.leaveDays}</p>
+                        ${salary.companyLeaveDays > 0 ? `<p class="font-semibold">Company Leave:</p><p>${salary.companyLeaveDays} day(s)</p>` : ''}
+                        <p class="font-semibold">Per Day Deduction:</p><p>₹${salary.perDayDeduction.toFixed(2)}</p>
+                        <p class="font-semibold">Leave Deduction:</p><p>₹${leaveDeduction.toFixed(2)}</p>
+                        <p class="font-semibold">Old Bill Deduction:</p><p>₹${salary.oldBillDeduction.toLocaleString()}</p>
+                        <p class="col-span-2 text-lg font-bold text-green-700 mt-2 border-t pt-2">Net Salary Paid: <span class="float-right">₹${Math.round(salary.netSalary).toLocaleString()}</span></p>
+                    </div>
+                </div>
+            `;
+            showModal(modalContent, false, null, true);
+        };
+
+        const renderLoading = (text = "Loading...") => {
+            appContainer.innerHTML = `
+                <div class="min-h-screen flex flex-col justify-center items-center space-y-4">
+                    <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900"></div>
+                    <p class="text-gray-600">${text}</p>
+                </div>
+            `;
+        };
+        
+        async function digestMessage(message) {
+            const msgUint8 = new TextEncoder().encode(message);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // --- AUTHENTICATION ---
+        const renderAuthScreen = () => {
+            appContainer.innerHTML = `
+                <div class="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+                    <div class="w-full max-w-md p-8 space-y-6 bg-white rounded-lg shadow-lg">
+                        <h1 class="text-3xl font-extrabold text-center text-blue-800">Staff Payroll Tracker</h1>
+                        <p id="auth-title" class="text-center text-gray-600">Sign in with your Shop ID</p>
+                        <form id="auth-form" class="space-y-6">
+                            <div>
+                                <label for="shopId" class="block text-sm font-medium text-gray-700">Shop ID</label>
+                                <input type="text" id="shopId" placeholder="e.g., MyTextileShop" class="w-full p-3 mt-1 border border-gray-300 rounded-md" required />
+                            </div>
+                            <div>
+                                <label for="password" class="block text-sm font-medium text-gray-700">Password</label>
+                                <input type="password" id="password" placeholder="••••••••" class="w-full p-3 mt-1 border border-gray-300 rounded-md" required />
+                            </div>
+                            <button id="auth-submit-btn" type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">Sign In</button>
+                        </form>
+                        <p class="text-center text-sm text-gray-600">
+                            <span id="auth-toggle-text">Don't have an account?</span>
+                            <button id="auth-toggle-btn" class="font-medium text-blue-600 hover:text-blue-500 ml-1">Create One</button>
+                        </p>
+                    </div>
+                </div>
+            `;
+
+            const authForm = document.getElementById('auth-form');
+            const authToggleBtn = document.getElementById('auth-toggle-btn');
+            let isLogin = true;
+
+            const updateAuthUI = () => {
+                document.getElementById('auth-title').textContent = isLogin ? 'Sign in with your Shop ID' : 'Create a New Account';
+                document.getElementById('auth-submit-btn').textContent = isLogin ? 'Sign In' : 'Create Account';
+                document.getElementById('auth-toggle-text').textContent = isLogin ? "Don't have an account?" : "Already have an account?";
+                document.getElementById('auth-toggle-btn').textContent = isLogin ? 'Create One' : 'Sign In';
+            };
+
+            authToggleBtn.onclick = () => { isLogin = !isLogin; updateAuthUI(); };
+
+            authForm.onsubmit = async (e) => {
+                e.preventDefault();
+                const shopId = document.getElementById('shopId').value.trim();
+                const password = document.getElementById('password').value;
+                if (!shopId || !password) { showModal("Shop ID and password cannot be empty."); return; }
+                renderLoading(isLogin ? "Signing in..." : "Creating account...");
+                const accountDocRef = doc(db, "accounts", shopId);
+                if (isLogin) {
+                    try {
+                        const docSnap = await getDoc(accountDocRef);
+                        if (!docSnap.exists()) throw new Error("No account found with this Shop ID.");
+                        const hashedPassword = await digestMessage(password);
+                        if (docSnap.data().passwordHash !== hashedPassword) throw new Error("Incorrect password.");
+                        currentShopId = shopId;
+                        sessionStorage.setItem('currentShopId', shopId);
+                        main();
+                    } catch (err) { showModal(`Login failed: ${err.message}`); renderAuthScreen(); }
+                } else {
+                    try {
+                        const docSnap = await getDoc(accountDocRef);
+                        if (docSnap.exists()) throw new Error("This Shop ID is already taken.");
+                        const hashedPassword = await digestMessage(password);
+                        await setDoc(accountDocRef, { passwordHash: hashedPassword, createdAt: Timestamp.now() });
+                        showModal("Account created successfully! Please sign in.");
+                        renderAuthScreen();
+                    } catch (err) { showModal(`Could not create account: ${err.message}`); renderAuthScreen(); }
+                }
+            };
+        };
+        
+        const handleSignOut = () => {
+            currentShopId = null;
+            sessionStorage.removeItem('currentShopId');
+            staffList = [];
+            main();
+        };
+
+        // --- SIGNATURE PAD ---
+        const renderSignaturePad = (containerId, onSaveCallback) => {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            container.innerHTML = `
+                <div class="border border-gray-300 rounded-md p-2 bg-white shadow-sm">
+                    <canvas id="${containerId}-canvas" class="touch-none w-full h-auto bg-gray-50 border border-dashed rounded-md"></canvas>
+                    <div class="flex justify-end mt-2">
+                        <button id="${containerId}-clear-btn" type="button" class="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 text-sm">Clear</button>
+                    </div>
+                </div>
+            `;
+
+            const canvas = document.getElementById(`${containerId}-canvas`);
+            const ctx = canvas.getContext('2d');
+            let drawing = false;
+
+            const resizeCanvas = () => {
+                if (!canvas.parentElement) return;
+                canvas.width = canvas.parentElement.clientWidth;
+                canvas.height = Math.min(canvas.parentElement.clientWidth * 0.5, 200);
+                ctx.lineWidth = 2;
+                ctx.lineCap = 'round';
+                ctx.strokeStyle = '#000';
+            };
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            const getEventCoords = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches ? e.touches[0] : null;
+                return { x: (touch || e).clientX - rect.left, y: (touch || e).clientY - rect.top };
+            };
+
+            const startDrawing = (e) => { e.preventDefault(); drawing = true; const { x, y } = getEventCoords(e); ctx.beginPath(); ctx.moveTo(x, y); };
+            const draw = (e) => { if (!drawing) return; e.preventDefault(); const { x, y } = getEventCoords(e); ctx.lineTo(x, y); ctx.stroke(); };
+            const endDrawing = () => {
+                if (!drawing) return;
+                drawing = false;
+                ctx.closePath();
+                const isEmpty = !ctx.getImageData(0, 0, canvas.width, canvas.height).data.some(channel => channel !== 0);
+                onSaveCallback(isEmpty ? null : canvas.toDataURL());
+            };
+
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', endDrawing);
+            canvas.addEventListener('mouseout', endDrawing);
+            canvas.addEventListener('touchstart', startDrawing);
+            canvas.addEventListener('touchmove', draw);
+            canvas.addEventListener('touchend', endDrawing);
+
+            document.getElementById(`${containerId}-clear-btn`).onclick = () => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                onSaveCallback(null);
+            };
+        };
+
+        // --- MAIN APP RENDER & TABS ---
+        const renderApp = () => {
+            appContainer.innerHTML = `
+                <div class="container mx-auto p-4 max-w-2xl">
+                    <header class="flex justify-between items-center mb-6">
+                        <h1 class="text-3xl font-extrabold text-blue-800 drop-shadow-sm">Payroll Tracker</h1>
+                        <button id="sign-out-btn" class="flex items-center px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600">Sign Out</button>
+                    </header>
+                    <div class="bg-blue-100 text-blue-800 p-3 rounded-md mb-6 text-center text-sm font-medium shadow-inner">Shop ID: <span class="font-mono">${currentShopId}</span></div>
+                    <nav id="nav-tabs" class="flex flex-wrap justify-around bg-blue-600 p-2 rounded-lg shadow-lg mb-6">
+                        <button data-tab="staff" class="tab-button flex-1 min-w-[100px] py-3 px-2 text-center text-white font-semibold rounded-md">Staff</button>
+                        <button data-tab="advance" class="tab-button flex-1 min-w-[100px] py-3 px-2 text-center text-white font-semibold rounded-md">Advance</button>
+                        <button data-tab="salary" class="tab-button flex-1 min-w-[100px] py-3 px-2 text-center text-white font-semibold rounded-md">Salary</button>
+                        <button data-tab="report" class="tab-button flex-1 min-w-[100px] py-3 px-2 text-center text-white font-semibold rounded-md">Report</button>
+                        <button data-tab="editSalary" class="tab-button flex-1 min-w-[100px] py-3 px-2 text-center text-white font-semibold rounded-md">Edit Salary</button>
+                    </nav>
+                    <main>
+                        <div id="staff-tab" class="tab-content"></div>
+                        <div id="advance-tab" class="tab-content"></div>
+                        <div id="salary-tab" class="tab-content"></div>
+                        <div id="report-tab" class="tab-content"></div>
+                        <div id="editSalary-tab" class="tab-content"></div>
+                    </main>
+                </div>
+            `;
+            
+            document.getElementById('sign-out-btn').onclick = handleSignOut;
+            document.querySelectorAll('.tab-button').forEach(button => button.onclick = () => switchTab(button.dataset.tab));
+            listenToStaff();
+            switchTab(activeTab);
+        };
+
+        const switchTab = (tabName) => {
+            activeTab = tabName;
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.add('hidden'));
+            document.querySelectorAll('.tab-button').forEach(button => button.classList.remove('active'));
+            
+            document.getElementById(`${tabName}-tab`).classList.remove('hidden');
+            document.querySelector(`button[data-tab="${tabName}"]`).classList.add('active');
+            
+            switch(tabName) {
+                case 'staff': renderStaffManagement(); break;
+                case 'advance': renderAdvanceEntry(); break;
+                case 'salary': renderSalaryCalculation(); break;
+                case 'report': renderReportSection(); break;
+                case 'editSalary': renderEditSalary(); break;
+            }
+        };
+
+        const listenToStaff = () => {
+            if (!currentShopId) return;
+            const staffCollectionRef = collection(db, `shops/${currentShopId}/staff`);
+            onSnapshot(staffCollectionRef, (snapshot) => {
+                staffList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                if (document.getElementById(`${activeTab}-tab`)) {
+                    switchTab(activeTab);
+                }
+            }, (error) => {
+                console.error("Error listening to staff collection:", error);
+                showModal("Error loading staff data.");
+            });
+        };
+
+        // --- STAFF MANAGEMENT ---
+        const renderStaffManagement = (editingStaff = null) => {
+            const staffTab = document.getElementById('staff-tab');
+            if (!staffTab) return;
+            const isEditing = !!editingStaff;
+            staffTab.innerHTML = `
+                <div class="p-4 bg-white rounded-lg shadow-md">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">${isEditing ? 'Edit Staff' : 'Add New Staff'}</h2>
+                    <form id="staff-form" class="mb-6 space-y-4">
+                        <input type="hidden" id="editing-staff-id" value="${isEditing ? editingStaff.id : ''}">
+                        <div><label for="staffName" class="block text-sm font-medium">Staff Name</label><input type="text" id="staffName" value="${isEditing ? editingStaff.name : ''}" class="w-full p-3 border rounded-md" required></div>
+                        <div><label for="defaultSalary" class="block text-sm font-medium">Default Salary (₹)</label><input type="number" id="defaultSalary" value="${isEditing ? editingStaff.defaultSalary : ''}" class="w-full p-3 border rounded-md" required></div>
+                        <div><label for="gender" class="block text-sm font-medium">Gender</label><select id="gender" class="w-full p-3 border rounded-md bg-white" required><option value="">Select Gender</option><option value="Male" ${isEditing && editingStaff.gender === 'Male' ? 'selected' : ''}>Male</option><option value="Female" ${isEditing && editingStaff.gender === 'Female' ? 'selected' : ''}>Female</option><option value="Other" ${isEditing && editingStaff.gender === 'Other' ? 'selected' : ''}>Other</option></select></div>
+                        <div><label for="location" class="block text-sm font-medium">Location</label><input type="text" id="location" value="${isEditing ? editingStaff.location : ''}" class="w-full p-3 border rounded-md" required></div>
+                        <div><label for="phoneNumber" class="block text-sm font-medium">Phone Number</label><input type="tel" id="phoneNumber" value="${isEditing ? editingStaff.phoneNumber : ''}" class="w-full p-3 border rounded-md" pattern="[0-9]{10}" required></div>
+                        <div class="flex space-x-2"><button type="submit" class="flex-1 px-4 py-3 bg-blue-600 text-white font-semibold rounded-md">${isEditing ? 'Update Staff' : 'Add Staff'}</button>${isEditing ? `<button type="button" id="cancel-edit-btn" class="px-4 py-3 bg-gray-500 text-white font-semibold rounded-md">Cancel Edit</button>` : ''}</div>
+                    </form>
+                    <h3 class="text-xl font-semibold mb-3 text-gray-700">Current Staff</h3><ul id="staff-list-ul" class="space-y-3"></ul>
+                </div>`;
+            renderStaffList();
+            document.getElementById('staff-form').onsubmit = handleAddOrUpdateStaff;
+            if (isEditing) document.getElementById('cancel-edit-btn').onclick = () => renderStaffManagement();
+        };
+        const renderStaffList = () => {
+            const ul = document.getElementById('staff-list-ul');
+            if (!ul) return;
+            ul.innerHTML = staffList.length === 0 ? `<p class="text-gray-500 text-center py-4">No staff added yet.</p>`
+                : staffList.map(staff => `
+                <li class="flex flex-col sm:flex-row items-start sm:items-center justify-between bg-gray-50 p-3 rounded-md border">
+                    <div class="flex-1 mb-2 sm:mb-0"><p class="font-medium">${staff.name}</p><p class="text-sm text-gray-600">Salary: ₹${staff.defaultSalary.toLocaleString()} | Phone: ${staff.phoneNumber}</p></div>
+                    <div class="flex space-x-2"><button data-id="${staff.id}" class="edit-staff-btn p-2 bg-orange-500 text-white rounded-full">Edit</button><button data-id="${staff.id}" class="delete-staff-btn p-2 bg-red-500 text-white rounded-full">Delete</button></div>
+                </li>`).join('');
+            document.querySelectorAll('.edit-staff-btn').forEach(btn => btn.onclick = (e) => renderStaffManagement(staffList.find(s => s.id === e.target.dataset.id)));
+            document.querySelectorAll('.delete-staff-btn').forEach(btn => btn.onclick = (e) => showModal("Delete this staff member and all their records?", true, () => handleDeleteStaff(e.target.dataset.id)));
+        };
+        const handleAddOrUpdateStaff = async (e) => {
+            e.preventDefault();
+            const staffData = { name: document.getElementById('staffName').value.trim(), defaultSalary: parseFloat(document.getElementById('defaultSalary').value), gender: document.getElementById('gender').value, location: document.getElementById('location').value.trim(), phoneNumber: document.getElementById('phoneNumber').value.trim() };
+            const editingId = document.getElementById('editing-staff-id').value;
+            try {
+                if (editingId) {
+                    await updateDoc(doc(db, `shops/${currentShopId}/staff`, editingId), staffData);
+                    showModal("Staff updated!");
+                } else {
+                    await addDoc(collection(db, `shops/${currentShopId}/staff`), { ...staffData, createdAt: Timestamp.now() });
+                    showModal("Staff added!");
+                }
+                renderStaffManagement();
+            } catch (err) { showModal(`Error: ${err.message}`); }
+        };
+        const handleDeleteStaff = async (idToDelete) => {
+             try {
+                await deleteDoc(doc(db, `shops/${currentShopId}/staff`, idToDelete));
+                showModal("Staff deleted.");
+            } catch (e) { showModal(`Error: ${e.message}`); }
+        };
+
+        // --- ADVANCE ENTRY ---
+        const renderAdvanceEntry = () => {
+            const advanceTab = document.getElementById('advance-tab');
+            if (!advanceTab) return;
+            let signatureData = null;
+            advanceTab.innerHTML = `
+                <div class="p-4 bg-white rounded-lg shadow-md">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Advance Entry</h2>
+                    <form id="advance-form" class="space-y-4">
+                        <div><label for="advance-staff-select" class="block text-sm font-medium">Staff Name</label><select id="advance-staff-select" class="w-full p-3 border rounded-md bg-white" required><option value="">Select Staff</option>${staffList.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
+                        <div><label for="advanceDate" class="block text-sm font-medium">Date of Advance</label><input type="date" id="advanceDate" value="${new Date().toISOString().split('T')[0]}" class="w-full p-3 border rounded-md" required></div>
+                        <div><label for="advanceAmount" class="block text-sm font-medium">Amount Taken (₹)</label><input type="number" id="advanceAmount" placeholder="e.g., 5000" class="w-full p-3 border rounded-md" required></div>
+                        <div><label class="block text-sm font-medium mb-1">Signature</label><div id="advance-signature-pad"></div></div>
+                        <button type="submit" class="w-full px-4 py-3 bg-green-600 text-white font-semibold rounded-md">Save Advance</button>
+                    </form>
+                </div>
+            `;
+            renderSignaturePad('advance-signature-pad', (data) => signatureData = data);
+            document.getElementById('advance-form').onsubmit = async (e) => {
+                e.preventDefault();
+                const staffId = document.getElementById('advance-staff-select').value;
+                const amount = parseFloat(document.getElementById('advanceAmount').value);
+                if (!staffId || !amount || !signatureData) { showModal("Please fill all fields and provide a signature."); return; }
+                try {
+                    await addDoc(collection(db, `shops/${currentShopId}/advances`), { staffId, amount, date: Timestamp.fromDate(new Date(document.getElementById('advanceDate').value)), signature: signatureData, createdAt: Timestamp.now() });
+                    showModal("Advance saved successfully!");
+                    renderAdvanceEntry(); // Reset form
+                } catch (err) { showModal(`Error: ${err.message}`); }
+            };
+        };
+        
+        // --- SALARY CALCULATION ---
+        const renderSalaryCalculation = () => {
+            const salaryTab = document.getElementById('salary-tab');
+            if (!salaryTab) return;
+
+            let calculationState = {
+                selectedStaffId: '',
+                fromDate: new Date().toISOString().split('T')[0],
+                toDate: new Date().toISOString().split('T')[0],
+                defaultSalary: 0,
+                totalAdvances: 0,
+                leaveDays: 0,
+                perDayDeduction: 0,
+                oldBillDeduction: 0,
+                netSalary: 0,
+                companyLeaveDays: 0,
+                paidSignature: null,
+            };
+
+            salaryTab.innerHTML = `
+                <div class="p-4 bg-white rounded-lg shadow-md">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Salary Calculation</h2>
+                    <div class="space-y-4 mb-6">
+                        <div>
+                            <label for="salary-staff-select" class="block text-sm font-medium">Staff Name</label>
+                            <select id="salary-staff-select" class="w-full p-3 border rounded-md bg-white" required>
+                                <option value="">Select Staff</option>
+                                ${staffList.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div><label for="salary-from-date" class="block text-sm font-medium">From Date</label><input type="date" id="salary-from-date" value="${calculationState.fromDate}" class="w-full p-3 border rounded-md"></div>
+                            <div><label for="salary-to-date" class="block text-sm font-medium">To Date</label><input type="date" id="salary-to-date" value="${calculationState.toDate}" class="w-full p-3 border rounded-md"></div>
+                        </div>
+                        <div id="salary-details-summary" class="bg-blue-50 p-4 rounded-md border border-blue-200"></div>
+                        <div><label for="leave-days" class="block text-sm font-medium">Leave Days</label><input type="number" id="leave-days" value="0" min="0" step="0.5" class="w-full p-3 border rounded-md"></div>
+                        <div id="leave-deduction-summary" class="bg-yellow-50 p-3 rounded-md border border-yellow-200 text-sm"></div>
+                        <div><label for="old-bill-deduction" class="block text-sm font-medium">Old Bill Deduction (Optional)</label><input type="number" id="old-bill-deduction" value="0" min="0" step="0.01" class="w-full p-3 border rounded-md"></div>
+                        <div id="net-salary-summary" class="bg-green-100 p-4 rounded-md border border-green-300 flex items-center justify-between"></div>
+                        <button id="generate-payslip-btn" class="w-full px-4 py-3 bg-indigo-600 text-white font-semibold rounded-md">Generate Pay Slip</button>
+                        <div id="payslip-preview" class="hidden mt-6 p-4 bg-gray-50 rounded-lg border shadow-inner"></div>
+                        <div><label class="block text-sm font-medium mb-1">Final Approval Signature</label><div id="salary-signature-pad"></div></div>
+                        <button id="mark-as-paid-btn" class="w-full px-4 py-3 bg-purple-600 text-white font-semibold rounded-md">பணம் செலுத்தியதாக குறிக்கவும்</button>
+                    </div>
+                </div>
+            `;
+            
+            renderSignaturePad('salary-signature-pad', data => calculationState.paidSignature = data);
+
+            const updateAndRecalculate = async () => {
+                const staffId = document.getElementById('salary-staff-select').value;
+                calculationState.selectedStaffId = staffId;
+                const staff = staffList.find(s => s.id === staffId);
+                
+                if (!staff) {
+                    calculationState.defaultSalary = 0;
+                    calculationState.perDayDeduction = 0;
+                } else {
+                    calculationState.defaultSalary = staff.defaultSalary;
+                    calculationState.perDayDeduction = staff.defaultSalary / 30;
+                }
+
+                calculationState.fromDate = document.getElementById('salary-from-date').value;
+                calculationState.toDate = document.getElementById('salary-to-date').value;
+                calculationState.leaveDays = parseFloat(document.getElementById('leave-days').value) || 0;
+                calculationState.oldBillDeduction = parseFloat(document.getElementById('old-bill-deduction').value) || 0;
+
+                // Fetch advances
+                if (staffId && calculationState.fromDate && calculationState.toDate) {
+                    const advancesQuery = query(collection(db, `shops/${currentShopId}/advances`), where("staffId", "==", staffId));
+                    const advancesSnap = await getDocs(advancesQuery);
+                    let total = 0;
+                    const from = new Date(calculationState.fromDate);
+                    const to = new Date(calculationState.toDate);
+                    advancesSnap.forEach(d => {
+                        const adv = d.data();
+                        const advDate = adv.date.toDate();
+                        if (advDate >= from && advDate <= to) {
+                            total += adv.amount;
+                        }
+                    });
+                    calculationState.totalAdvances = total;
+                } else {
+                    calculationState.totalAdvances = 0;
+                }
+
+                // Calculate leave
+                calculationState.companyLeaveDays = calculationState.leaveDays === 1 ? 1 : (calculationState.leaveDays > 1 ? 1 : 0);
+                const deductibleLeaveDays = calculationState.leaveDays > 1 ? calculationState.leaveDays - 1 : 0;
+                const leaveDeduction = deductibleLeaveDays * calculationState.perDayDeduction;
+
+                // Calculate net salary
+                const totalDeductions = calculationState.totalAdvances + leaveDeduction + calculationState.oldBillDeduction;
+                calculationState.netSalary = Math.max(0, calculationState.defaultSalary - totalDeductions);
+
+                // Update UI
+                document.getElementById('salary-details-summary').innerHTML = `
+                    <p>Default Salary: <span class="font-semibold float-right">₹${calculationState.defaultSalary.toLocaleString()}</span></p>
+                    <p>Total Advances: <span class="font-semibold float-right">₹${calculationState.totalAdvances.toLocaleString(undefined, {minimumFractionDigits: 2})}</span></p>
+                `;
+                document.getElementById('leave-deduction-summary').innerHTML = `
+                    <p>Per Day Deduction: ₹${calculationState.perDayDeduction.toFixed(2)}</p>
+                    <p>Leave Deduction: ${calculationState.leaveDays === 1 ? '<span class="text-red-600 font-semibold">பிடிக்கவில்லை</span>' : `₹${leaveDeduction.toFixed(2)}`}</p>
+                    ${calculationState.companyLeaveDays > 0 ? `<p>Company Leave: ${calculationState.companyLeaveDays} day(s)</p>` : ''}
+                `;
+                document.getElementById('net-salary-summary').innerHTML = `
+                    <p class="text-lg font-bold">Net Salary:</p>
+                    <span class="text-2xl font-extrabold text-green-700">₹${calculationState.netSalary.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                `;
+            };
+
+            ['salary-staff-select', 'salary-from-date', 'salary-to-date', 'leave-days', 'old-bill-deduction'].forEach(id => {
+                document.getElementById(id).onchange = updateAndRecalculate;
+            });
+            
+            document.getElementById('generate-payslip-btn').onclick = () => {
+                const staff = staffList.find(s => s.id === calculationState.selectedStaffId);
+                if (!staff) { showModal("Please select a staff member."); return; }
+                
+                const preview = document.getElementById('payslip-preview');
+                preview.classList.remove('hidden');
+                
+                const leaveDeduction = (calculationState.leaveDays - calculationState.companyLeaveDays) * calculationState.perDayDeduction;
+
+                preview.innerHTML = `
+                    <h3 class="text-xl font-bold mb-3 text-gray-800">சம்பளச் சீட்டு முன்னோட்டம்</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-gray-700">
+                        <p><strong>ஊழியர் பெயர்:</strong> ${staff.name}</p>
+                        <p><strong>தேதி முதல்:</strong> ${calculationState.fromDate}</p>
+                        <p><strong>தேதி வரை:</strong> ${calculationState.toDate}</p>
+                        <p><strong>அடிப்படை சம்பளம்:</strong> ₹${calculationState.defaultSalary.toLocaleString()}</p>
+                        <p><strong>மொத்த முன்பணங்கள்:</strong> ₹${calculationState.totalAdvances.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                        <p><strong>விடுப்பு நாட்கள்:</strong> ${calculationState.leaveDays}</p>
+                        ${calculationState.companyLeaveDays > 0 ? `<p><strong>கம்பெனி விடுப்பு:</strong> ${calculationState.companyLeaveDays} நாள்(கள்)</p>` : ''}
+                        <p><strong>ஒரு நாள் பிடித்தம்:</strong> ₹${calculationState.perDayDeduction.toFixed(2)}</p>
+                        <p><strong>விடுப்பு பிடித்தம்:</strong> ${calculationState.leaveDays === 1 ? `<span class="text-red-600 font-semibold">பிடிக்கவில்லை</span>` : `₹${leaveDeduction.toFixed(2)}`}</p>
+                        <p><strong>பழைய பில் பிடித்தம்:</strong> ₹${calculationState.oldBillDeduction.toLocaleString()}</p>
+                        <p class="col-span-full text-lg font-bold text-green-700">நிகர சம்பளம்: ₹${calculationState.netSalary.toFixed(2)}</p>
+                        <p class="col-span-full text-lg font-bold text-green-700">நிகர சம்பளம் (சுற்று): ₹${Math.round(calculationState.netSalary).toLocaleString()}</p>
+                    </div>
+                    <div class="flex justify-center space-x-4 mt-4">
+                        <button id="send-sms-btn" class="flex items-center px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600">Send SMS</button>
+                        <button id="send-whatsapp-btn" class="flex items-center px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600">Send WhatsApp</button>
+                    </div>
+                `;
+
+                const sendPaySlip = (method) => {
+                    if (!staff.phoneNumber) { showModal("Staff phone number not found."); return; }
+                    const message = `Pay Slip for ${staff.name} (${calculationState.fromDate} to ${calculationState.toDate}):\nDefault Salary: ₹${calculationState.defaultSalary.toLocaleString()}\nTotal Advances: ₹${calculationState.totalAdvances.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\nLeave Days: ${calculationState.leaveDays} (Company Leave: ${calculationState.companyLeaveDays}, Deduction: ₹${leaveDeduction.toFixed(2)})\nOld Bill Deduction: ₹${calculationState.oldBillDeduction.toLocaleString()}\nNet Salary: ₹${Math.round(calculationState.netSalary).toLocaleString()}`;
+                    const link = method === 'sms' ? `sms:${staff.phoneNumber}?body=${encodeURIComponent(message)}` : `https://wa.me/${staff.phoneNumber}?text=${encodeURIComponent(message)}`;
+                    window.open(link, '_blank');
+                };
+
+                document.getElementById('send-sms-btn').onclick = () => sendPaySlip('sms');
+                document.getElementById('send-whatsapp-btn').onclick = () => sendPaySlip('whatsapp');
+            };
+
+            document.getElementById('mark-as-paid-btn').onclick = async () => {
+                if (!calculationState.selectedStaffId || !calculationState.paidSignature) {
+                    showModal("Please select staff and provide a signature."); return; }
+                try {
+                    await addDoc(collection(db, `shops/${currentShopId}/salariesPaid`), { ...calculationState, paidAt: Timestamp.now() });
+                    showModal("Salary marked as paid!");
+                    renderSalaryCalculation();
+                } catch (err) { showModal(`Error: ${err.message}`); }
+            };
+
+            updateAndRecalculate(); // Initial calculation
+        };
+
+        // --- REPORT SECTION ---
+        const renderReportSection = () => {
+            const reportTab = document.getElementById('report-tab');
+            if (!reportTab) return;
+            reportTab.innerHTML = `
+                <div class="p-4 bg-white rounded-lg shadow-md">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Report Section</h2>
+                    <div class="mb-4"><label for="report-staff-select" class="block text-sm font-medium">Select Staff</label><select id="report-staff-select" class="w-full p-3 border rounded-md bg-white"><option value="">Select Staff</option>${staffList.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
+                    <div id="report-content" class="space-y-6"></div>
+                </div>
+            `;
+            document.getElementById('report-staff-select').onchange = async (e) => {
+                const staffId = e.target.value;
+                const contentEl = document.getElementById('report-content');
+                if (!staffId) { contentEl.innerHTML = ''; return; }
+                contentEl.innerHTML = `<div class="text-center">Loading reports...</div>`;
+
+                // Fetch Advances
+                const advancesQuery = query(collection(db, `shops/${currentShopId}/advances`), where("staffId", "==", staffId));
+                const advancesSnap = await getDocs(advancesQuery);
+                const advances = advancesSnap.docs.map(d => d.data()).sort((a, b) => b.date.toMillis() - a.date.toMillis());
+                const advancesHtml = `
+                    <div class="bg-blue-50 p-4 rounded-md border">
+                        <h3 class="text-xl font-semibold mb-3">Advance History</h3>
+                        ${advances.length === 0 ? `<p>No advances found.</p>` : `<ul class="space-y-2">${advances.map(adv => `<li class="bg-white p-3 rounded-md border flex justify-between items-center"><div><p class="font-medium">₹${adv.amount.toLocaleString()}</p><p class="text-sm text-gray-600">${adv.date.toDate().toLocaleDateString()}</p></div><img src="${adv.signature}" alt="Signature" class="h-10 w-20 object-contain border"/></li>`).join('')}</ul>`}
+                    </div>`;
+
+                // Fetch Salaries
+                const salariesQuery = query(collection(db, `shops/${currentShopId}/salariesPaid`), where("selectedStaffId", "==", staffId));
+                const salariesSnap = await getDocs(salariesQuery);
+                const salaries = salariesSnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.paidAt.toMillis() - a.paidAt.toMillis());
+                const salariesHtml = `
+                    <div class="bg-green-50 p-4 rounded-md border">
+                        <h3 class="text-xl font-semibold mb-3">Salary History</h3>
+                        ${salaries.length === 0 ? `<p>No salary payments found.</p>` : `<ul class="space-y-2">${salaries.map(salary => `
+                            <li class="bg-white p-3 rounded-md border flex flex-col sm:flex-row justify-between items-start">
+                                <div class="flex-1 mb-2 sm:mb-0">
+                                    <p class="font-medium text-gray-800">Net Salary: ₹${Math.round(salary.netSalary).toLocaleString()}</p>
+                                    <p class="text-sm text-gray-600">Paid Date: ${salary.paidAt.toDate().toLocaleDateString()}</p>
+                                    <p class="text-xs text-gray-500">Period: ${new Date(salary.fromDate).toLocaleDateString()} to ${new Date(salary.toDate).toLocaleDateString()}</p>
+                                </div>
+                                <div class="flex items-center space-x-2 mt-2 sm:mt-0">
+                                    ${salary.paidSignature ? `<img src="${salary.paidSignature}" alt="Paid Signature" class="h-10 w-20 object-contain border" />` : ''}
+                                    <button data-salary-id="${salary.id}" class="view-salary-btn px-3 py-1 bg-blue-500 text-white text-sm rounded-md hover:bg-blue-600">View</button>
+                                </div>
+                            </li>`).join('')}</ul>`}
+                    </div>`;
+
+                contentEl.innerHTML = advancesHtml + salariesHtml;
+
+                document.querySelectorAll('.view-salary-btn').forEach(btn => {
+                    btn.onclick = (e) => {
+                        const salaryId = e.target.dataset.salaryId;
+                        const salaryDetails = salaries.find(s => s.id === salaryId);
+                        if (salaryDetails) {
+                            showSalaryDetailsModal(salaryDetails);
+                        }
+                    };
+                });
+            };
+        };
+
+        // --- EDIT SALARY ---
+        const renderEditSalary = () => {
+            const editSalaryTab = document.getElementById('editSalary-tab');
+            if (!editSalaryTab) return;
+            editSalaryTab.innerHTML = `
+                <div class="p-4 bg-white rounded-lg shadow-md">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-800">Edit Salary</h2>
+                    <form id="edit-salary-form" class="space-y-4">
+                        <div><label for="edit-salary-staff-select" class="block text-sm font-medium">Staff Name</label><select id="edit-salary-staff-select" class="w-full p-3 border rounded-md bg-white" required><option value="">Select Staff</option>${staffList.map(s => `<option value="${s.id}" data-salary="${s.defaultSalary}">${s.name}</option>`).join('')}</select></div>
+                        <div id="current-salary-display" class="hidden"></div>
+                        <div><label for="newSalary" class="block text-sm font-medium">New Salary (₹)</label><input type="number" id="newSalary" class="w-full p-3 border rounded-md" required></div>
+                        <button type="submit" class="w-full px-4 py-3 bg-orange-600 text-white font-semibold rounded-md">Update Salary</button>
+                    </form>
+                </div>
+            `;
+            const staffSelect = document.getElementById('edit-salary-staff-select');
+            const salaryDisplay = document.getElementById('current-salary-display');
+            const newSalaryInput = document.getElementById('newSalary');
+            staffSelect.onchange = (e) => {
+                const selectedOption = e.target.options[e.target.selectedIndex];
+                const currentSalary = selectedOption.dataset.salary;
+                if (currentSalary) {
+                    salaryDisplay.innerHTML = `<p class="text-gray-600">Current Salary: <span class="font-bold">₹${parseFloat(currentSalary).toLocaleString()}</span></p>`;
+                    salaryDisplay.classList.remove('hidden');
+                    newSalaryInput.value = currentSalary;
+                } else {
+                    salaryDisplay.classList.add('hidden');
+                    newSalaryInput.value = '';
+                }
+            };
+            document.getElementById('edit-salary-form').onsubmit = async (e) => {
+                e.preventDefault();
+                const staffId = staffSelect.value;
+                const newSalary = parseFloat(newSalaryInput.value);
+                if (!staffId || !newSalary) { showModal("Please select staff and enter a valid salary."); return; }
+                try {
+                    await updateDoc(doc(db, `shops/${currentShopId}/staff`, staffId), { defaultSalary: newSalary });
+                    showModal("Salary updated successfully!");
+                } catch (err) { showModal(`Error: ${err.message}`); }
+            };
+        };
+
+        // --- MAIN APP INITIALIZATION ---
+        const main = () => {
+            if (currentShopId) {
+                renderApp();
+            } else {
+                renderAuthScreen();
+            }
+        };
+
+        main();
+
+    </script>
+
+</body>
+</html>
